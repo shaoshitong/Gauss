@@ -45,7 +45,7 @@ def save_file_txt(flist,file_name):
         for f in flist:
             rf.writelines(f+'\n')
 class ImageFilelist(Dataset):
-    def __init__(self, file, transform=None,
+    def __init__(self, file, transform=train_transform,
                  flist_reader=default_reader, loader=default_loader,save_file=save_file_txt):
         self.root = ""
         self.flist=make_dataset("./train")
@@ -57,7 +57,6 @@ class ImageFilelist(Dataset):
             str((path.split("\\")[-1]).split('_')[0])+str((path.split("\\")[-1]).split('_')[1])
             for path in self.imlist])))
         self.class_to_idx = {self.classes[i]: i for i in range(len(self.classes))}
-        print(self.class_to_idx)
         self.imgs = [(impath, self.class_to_idx[str((impath.split("\\")[-1]).split('_')[0])+str((impath.split("\\")[-1]).split('_')[1])]) for impath in self.imlist]
     def __getitem__(self, index):
         impath, label = self.imgs[index]
@@ -68,7 +67,3 @@ class ImageFilelist(Dataset):
 
     def __len__(self):
         return len(self.imgs)
-
-a=ImageFilelist("tmp.txt",train_transform)
-for i,(image,label) in enumerate(a):
-    print(image.shape,label)
