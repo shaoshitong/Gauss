@@ -72,10 +72,10 @@ class SIFT_Layer(nn.Module):
         @param bias:=in_channels
         """
         super(SIFT_Layer, self).__init__()
-        self.unsample = nn.Upsample(None, scale_factor=2, mode=unsample_mode, align_corners=True)
+        self.Scale = Scale
         self.sigma = sigma
-        self.kernel_size1 = 5
-        self.kernel_size2 = 9
+        self.kernel_size1 = int(max(3, 2. * self.Scale + 1) // 1) + 1
+        self.kernel_size2 = int(max(3, 2. * self.Scale * 2. + 1) // 1) + 1
         self.shape = img.shape
         self.group = group
         self.doulb_base = double_base
@@ -90,10 +90,11 @@ class SIFT_Layer(nn.Module):
         self.npdl = self.npcl - 1
         self.float_sigma = math.sqrt(2.)
         self.float_k = math.pow(2, 1. / self.npcl)
+        self.unsample = nn.Upsample(None, scale_factor=2, mode=unsample_mode, align_corners=True)
+        self.sample = lambda x: F.interpolate(x, scale_factor=0.5, mode=unsample_mode, align_corners=True)
         self.gauss2D_kernel1 = self._gauss2D(self.kernel_size1, self.sigma, self.group, self.in_channel,
                                              self.out_channel)
         self.gauss2D_bias1 = Parameter(torch.zeros(self.in_channel), requires_grad=False)
-        print(self.gauss2D_bias1.shape, self.gauss2D_kernel1.shape)
         self.GaussianBlur1 = lambda x: F.conv2d(x, weight=self.gauss2D_kernel1, bias=self.gauss2D_bias1, stride=1,
                                                 groups=self.group,
                                                 padding=1)
@@ -103,46 +104,123 @@ class SIFT_Layer(nn.Module):
         self.GaussianBlur2 = lambda x: F.conv2d(x, weight=self.gauss2D_kernel2, bias=self.gauss2D_bias2, stride=1,
                                                 groups=self.group,
                                                 padding=1)
+        self.octaves, self.DOGoctaves = self._found_Octaves_parameter()
 
     """
     TODO : found
     """
 
-    def _found_Octaves_parameter(self, ):
+    def _found_Octaves_parameter(self):
         nums = self._get_nums()
+        self.nums = nums
         octaves = {}
         DOGoctaves = {}
+        shape = [*(self.shape)]
         for num in range(nums):
             octaves[num + 1] = ImageOctave()
             DOGoctaves[num + 1] = ImageOctave()
-            octaves[num + 1].ImageLevel = [ImageLevel for i in range(self.npcl)]
-            octaves[num + 1].ImageLevel = [ImageLevel for i in range(self.npdl)]
-            octaves[num + 1].col = self.shape[-2], octaves[num + 1].row = self.shape[-1]
-            DOGoctaves[num + 1].col = self.shape[-2], DOGoctaves[num + 1].row = self.shape[-1]
-            octaves[num + 1].subsample = math.pow(2, num) / 2. if self.doulb_base else octaves[
-                num + 1].subsample = math.pow(2, num)
+            octaves[num + 1].ImageLevel = [ImageLevel() for i in range(self.npcl)]
+            DOGoctaves[num + 1].ImageLevel = [ImageLevel() for i in range(self.npdl)]
+            octaves[num + 1].col = int(shape[-2])
+            octaves[num + 1].row = int(shape[-1])
+            DOGoctaves[num + 1].col = int(shape[-2])
+            DOGoctaves[num + 1].row = int(shape[-1])
+            octaves[num + 1].subsample = (math.pow(2, num) / 2.) if self.doulb_base else math.pow(2, num)
+            if num == 0:
+                octaves[num + 1].ImageLevel[0].levelsigma = self.float_sigma
+                octaves[num + 1].ImageLevel[0].absolute_sigma = self.float_sigma / 2
+            else:
+                octaves[num + 1].ImageLevel[0].levelsigma = self.float_sigma
+                octaves[num + 1].ImageLevel[0].absolute_sigma = octaves[num].ImageLevel[self.npcl - 3].absolute_sigma
+            sigma = self.float_sigma
+            """
+              dst = Mat(tempMat.rows, tempMat.cols, CV_32FC1);//用于存储高斯层  
+                temp = Mat(tempMat.rows, tempMat.cols, CV_32FC1);//用于存储DOG层  
+
+                sigma_act = sqrt(k * k - 1) * sigma;
+                sigma = k * sigma;
+
+                (octaves[i].Octave)[j].levelsigma = sigma;
+                (octaves[i].Octave)[j].absolute_sigma = sigma * (octaves[i].subsample);
+                // (octaves[i].Octave)[j].absolute_sigma = k *((octaves[i].Octave)[j-1].absolute_sigma);
+
+                //产生高斯层  
+                int gaussdim = (int)max(3.0, 2.0 * GAUSSKERN * sigma_act + 1.0);//高斯核的尺寸
+                gaussdim = 2 * (gaussdim / 2) + 1;
+                GaussianBlur((octaves[i].Octave)[j - 1].Level, dst, Size(gaussdim, gaussdim), sigma_act);
+                //BlurImage((octaves[i].Octave)[j - 1].Level, dst, sigma_act);
+                (octaves[i].Octave)[j].levelsigmalength = gaussdim;
+                (octaves[i].Octave)[j].Level = dst;
+
+                //产生DOG层  
+                temp = ((octaves[i].Octave)[j]).Level - ((octaves[i].Octave)[j - 1]).Level;
+                //subtract(((octaves[i].Octave)[j]).Level, ((octaves[i].Octave)[j - 1]).Level, temp, 0);
+                ((DOGoctaves[i].Octave)[j - 1]).Level = temp;
+            """
+            for j in range(1, self.Scale + 3):
+                """
+                init output
+                name dst temp
+                """
+                sigma_act = math.sqrt(self.float_k ** 2 - 1) * self.float_sigma
+                sigma = self.float_k * sigma
+                octaves[num + 1].ImageLevel[j].levelsigma = sigma
+                octaves[num + 1].ImageLevel[j].absolute_sigma = self.float_k * (
+                    octaves[num + 1].ImageLevel[j - 1].absolute_sigma)
+                gau_kernel_size = int(max(3., 2. * 3.5 * sigma_act + 1)) + 1
+                octaves[num + 1].ImageLevel[j].levelsigmalen = gau_kernel_size
+                ##Gauss
+                ##DOG层
+
+            ##tempMat = halfSizeImage(((octaves[i].Octave)[SCALESPEROCTAVE].Level));
+            shape[-2] = shape[-2] // 2
+            shape[-1] = shape[-1] // 2
+        return octaves, DOGoctaves
+
+    def f_forward(self, x):
+        """
+        this forward use to create DOG_image and image
+        """
+        octaves, DOGoctaves = self.octaves, self.DOGoctaves
+        """
+        (octaves[i].Octave)[0].Level = tempMat;
+        """
+        for num in range(self.nums):
+            octaves[num + 1].ImageLevel[0].level = x.clone().detach().cpu()
+            for j in range(1, self.Scale + 3):
+                gauss2D_kernel = self._gauss2D(octaves[num + 1].ImageLevel[j].levelsigmalen,
+                                               octaves[num + 1].ImageLevel[j].levelsigma / self.float_k, self.group,
+                                               self.in_channel,
+                                               self.out_channel)
+                gauss2D_bias = Parameter(torch.zeros(self.in_channel), requires_grad=False)
+                x = F.conv2d(x, weight=gauss2D_kernel, bias=gauss2D_bias, stride=1,
+                             groups=self.group,
+                             padding=(octaves[num + 1].ImageLevel[j].levelsigmalen - 1) // 2)
+
+                octaves[num + 1].ImageLevel[j].level = x.clone().detach().cpu()
+                """
+                temp = ((octaves[i].Octave)[j]).Level - ((octaves[i].Octave)[j - 1]).Level;
+                """
+
+                DOGoctaves[num + 1].ImageLevel[j - 1].level = octaves[num + 1].ImageLevel[j].level - \
+                                                              octaves[num + 1].ImageLevel[j - 1].level
+                print(DOGoctaves[num + 1].ImageLevel[j - 1].level[0, :, 0, 0])
+            x = self.sample(x)
+        return x
 
     """
-    get number
-            int numoctaves = 4;
-
-        {
-            int dim = min(init_Mat.rows, init_Mat.cols);
-            numoctaves = (int)(log((double)dim) / log(2.0)) - 2;    //金字塔阶数
-            numoctaves = min(numoctaves, MAXOCTAVES);
-            sf->numoctaves = numoctaves;
-        }
-
+            float sigma = init_sigma;
+            float sigma_act, absolute_sigma;    //每次直接作用于前图像上的blur值    ；   尺度空间中的绝对值
     """
 
     def _get_nums(self):
         shape = self.shape
         dim = min(shape[-2], shape[-1])
         nums = (int)(math.log(dim) / math.log(2.0)) - 2
-        nums = min(nums, 4)
+        nums = min(nums, 3)
         return nums
 
-    def get_uss2D(self, kernel_size, sigma, group, in_channel, out_channel, requires_grad=False):
+    def _gauss2D(self, kernel_size, sigma, group, in_channel, out_channel, requires_grad=False):
         kernel = torch.zeros(kernel_size, kernel_size)
         center = kernel_size // 2
         if sigma <= 0:
@@ -180,6 +258,7 @@ class SIFT_Layer(nn.Module):
         if self.doulb_base:
             x = self.unsample(x)
         x = self.GaussianBlur2(x)
+        x = self.f_forward(x)
         return x
 
 
@@ -195,7 +274,15 @@ if __name__ == "__main__":
     for i, (image, label) in enumerate(test_loader):
         if i > 1:
             break
-        output = sift_layer.forward(image)[0].permute(2, 1, 0)
-        vis_img([image[0].permute(2, 1, 0), output])
+        ll = []
+        ll.append(image.clone()[0].permute(2, 1, 0))
+        output = sift_layer.forward(image)
+        for num in range(sift_layer.nums):
+            for j in range(sift_layer.Scale + 2):
+                ll.append(sift_layer.octaves[num + 1].ImageLevel[j].level[0].permute(2, 1, 0))
+                ll.append(sift_layer.DOGoctaves[num + 1].ImageLevel[j].level[0].permute(2, 1, 0))
+        vis_img(ll, "image","gauss1", "chafen1", "gauss2", "chafen2", "gauss3", "chafen3", "gauss4", "chafen4", "gauss5",
+                "chafen5", "gauss6", "chafen6", "gauss7", "chafen7", "gauss8", "chafen8", "gauss9", "chafen9",
+                "gauss10", "chafen10", "gauss11", "chafen11", "gauss12", "chafen12")
 
     pass
